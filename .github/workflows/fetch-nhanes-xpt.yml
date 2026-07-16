@@ -1,9 +1,7 @@
 name: Fetch official NHANES XPT
 
 on:
-  push:
-    paths:
-      - '.github/workflows/fetch-nhanes-xpt.yml'
+  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -18,6 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      - uses: actions/checkout@v4
       - name: Download official XPT files
         shell: bash
         run: |
