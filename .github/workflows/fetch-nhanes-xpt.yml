@@ -1,0 +1,82 @@
+name: Fetch official NHANES XPT
+
+on:
+  push:
+    paths:
+      - '.github/workflows/fetch-nhanes-xpt.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  BASE2017: https://wwwn.cdc.gov/Nchs/Data/Nhanes/Public/2017/DataFiles
+  BASE2021: https://wwwn.cdc.gov/Nchs/Data/Nhanes/Public/2021/DataFiles
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Download official XPT files
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p nhanes_xpt
+          required=(
+            DEMO_J CBC_J BIOPRO_J BMX_J LUX_J
+            DEMO_L CBC_L BIOPRO_L BMX_L LUX_L
+          )
+          optional=(
+            SMQ_J ALQ_J PAQ_J DIQ_J BPQ_J MCQ_J GHB_J HSCRP_J HEPC_J HEPBD_J
+            SMQ_L ALQ_L PAQ_L DIQ_L BPQ_L MCQ_L GHB_L HSCRP_L HEPC_L HEPBD_L
+          )
+          : > nhanes_xpt/download_manifest.tsv
+          printf 'stem\tcycle\trequired\turl\tstatus\tbytes\tsha256\n' >> nhanes_xpt/download_manifest.tsv
+          download_one() {
+            stem="$1"; req="$2"
+            if [[ "$stem" == *_J ]]; then base="$BASE2017"; cyc=J; else base="$BASE2021"; cyc=L; fi
+            url="$base/$stem.xpt"
+            out="nhanes_xpt/$stem.xpt"
+            status=OK
+            if ! curl -L --retry 5 --retry-all-errors --connect-timeout 30 --max-time 300 -fSs "$url" -o "$out"; then
+              status=FAILED
+              rm -f "$out"
+            fi
+            if [[ -f "$out" ]]; then
+              bytes=$(stat -c%s "$out")
+              sha=$(sha256sum "$out" | awk '{print $1}')
+            else
+              bytes=0; sha=''
+            fi
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$stem" "$cyc" "$req" "$url" "$status" "$bytes" "$sha" >> nhanes_xpt/download_manifest.tsv
+            if [[ "$req" == TRUE && "$status" != OK ]]; then return 1; fi
+            return 0
+          }
+          failed=0
+          for f in "${required[@]}"; do download_one "$f" TRUE || failed=1; done
+          for f in "${optional[@]}"; do download_one "$f" FALSE || true; done
+          cat nhanes_xpt/download_manifest.tsv
+          if [[ "$failed" -ne 0 ]]; then exit 2; fi
+      - name: Verify XPORT headers and key weight strings
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          required=['DEMO_J','CBC_J','BIOPRO_J','BMX_J','LUX_J','DEMO_L','CBC_L','BIOPRO_L','BMX_L','LUX_L']
+          for stem in required:
+              p=Path('nhanes_xpt')/(stem+'.xpt')
+              b=p.read_bytes()
+              if len(b)<1024 or b[:8] != b'HEADER R':
+                  raise SystemExit(f'Invalid SAS XPORT file: {p}')
+          if b'WTPH2YR' not in (Path('nhanes_xpt')/'CBC_L.xpt').read_bytes():
+              raise SystemExit('CBC_L missing WTPH2YR')
+          print('All required XPT headers valid; CBC_L contains WTPH2YR.')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: official-nhanes-j-l-xpt
+          path: nhanes_xpt
+          if-no-files-found: error
+          retention-days: 7
